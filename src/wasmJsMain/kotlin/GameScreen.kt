@@ -19,7 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.*
 
 @Composable
 fun GameScreen() {
@@ -91,6 +91,9 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         )
     }
 
+    var missingChairIndex by remember { mutableStateOf<Int?>(null) } // [NEW] Track missing chair
+    var eliminatedPlayerIndex by remember { mutableStateOf<Int?>(null) } // [NEW] Track eliminated player
+
     val mainProgress = remember { Animatable(0f) }
 
     val rowYOffsets = listOf(-140f, -70f, 0f, 70f, 140f) 
@@ -114,6 +117,16 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
 
     LaunchedEffect(gameState) {
         if (gameState == GameState.PLAYING) {
+            // [NEW] Reset and start timer for disappearing chair
+            missingChairIndex = null
+            eliminatedPlayerIndex = null
+            launch {
+                delay(5000)
+                if (isActive) {
+                    missingChairIndex = (0..9).random()
+                }
+            }
+
             while (isActive) {
                 mainProgress.animateTo(
                     targetValue = mainProgress.value + 10f, 
@@ -124,6 +137,29 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         } else if (gameState == GameState.STOPPING) {
             val current = mainProgress.value
             val target = kotlin.math.ceil(current)
+            
+            // Calculate which player will land on the missing chair
+            if (missingChairIndex != null) {
+                // Map from path point index to chair index
+                // Path: top-left(0) → top-right(1) → right-side-down(2-5) → bottom-left(6) → left-side-up(7-9)
+                // Chairs: left-right pairs from top to bottom (0-9)
+                val pathToChairMap = listOf(0, 1, 3, 5, 7, 9, 8, 6, 4, 2)
+                
+                // When animation stops at 'target', player at index 'i' will be at path point (target + i) % 10
+                // We need to find which player's path point maps to the missing chair
+                val targetMod = (target % 10).toInt()
+                
+                // Find which player index lands on the missing chair
+                for (playerIndex in 0..9) {
+                    val pathPoint = (targetMod + playerIndex) % 10
+                    val chairIndex = pathToChairMap[pathPoint]
+                    if (chairIndex == missingChairIndex) {
+                        eliminatedPlayerIndex = playerIndex
+                        break
+                    }
+                }
+            }
+
             mainProgress.animateTo(
                 targetValue = target,
                 animationSpec = spring(stiffness = Spring.StiffnessLow)
@@ -160,8 +196,8 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         }
         // Bottom Crossing (5 -> 6)
         else if (currentSlot == 5) {
-             val controlPoint = Offset(0f, 300f) // Arc much lower
-             return quadraticBezier(p1, controlPoint, p2, fraction)
+            val controlPoint = Offset(0f, 300f) // Arc much lower
+            return quadraticBezier(p1, controlPoint, p2, fraction)
         }
         
         // Linear interpolation for side movements
@@ -175,39 +211,79 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
+        val arenaBackgroundColor = Color(0xFFE0E0E0)
         Box(
             modifier = Modifier
                 .size(600.dp)
                 .clip(RectangleShape)
-                .background(Color(0xFFE0E0E0)) 
+                .background(arenaBackgroundColor) 
                 .padding(16.dp),
             contentAlignment = Alignment.Center
         ) {
             // Render Chairs Absolutely to match the Rows
+            // Map 0..9 indices to the chairs in order (Top-Left down, then Bottom-Right up? Or simple row order?)
+            // Based on pathPoints, logic for 'chairs' isn't explicitly indexed 0..9 in the original code, 
+            // but let's assign them indices 0..9 for the purpose of "random chair".
+            // Left col: 0, 1, 2, 3, 4 (top to bottom) -> Y offsets -140..140
+            // Right col: 5, 6, 7, 8, 9 (top to bottom) -> Y offsets -140..140
+            // Wait, original code:
+            // rowYOffsets.forEach { y ->
+            //    Chair(left)
+            //    Chair(right)
+            // }
+            // That renders 10 chairs. Let's assign indices:
+            // i=0: left, y[0]; i=1: right, y[0]
+            // i=2: left, y[1]; i=3: right, y[1]
+            // ...
+            
+            var chairCounter = 0
             rowYOffsets.forEach { y ->
-                Chair(modifier = Modifier.offset(x = (-30).dp, y = y.dp))
-                Chair(modifier = Modifier.offset(x = 30.dp, y = y.dp))
+                // Left Chair
+                val isLeftMissing = missingChairIndex == chairCounter
+                val leftColor = if (isLeftMissing) arenaBackgroundColor else Color(0xFFFF9800)
+                val leftBorderColor = if (isLeftMissing) arenaBackgroundColor else Color(0xFFE65100) // Hide border too
+                
+                Chair(
+                    modifier = Modifier.offset(x = (-30).dp, y = y.dp),
+                    color = leftColor,
+                    borderColor = leftBorderColor
+                )
+                chairCounter++
+
+                // Right Chair
+                val isRightMissing = missingChairIndex == chairCounter
+                val rightColor = if (isRightMissing) arenaBackgroundColor else Color(0xFFFF9800)
+                val rightBorderColor = if (isRightMissing) arenaBackgroundColor else Color(0xFFE65100) 
+
+                Chair(
+                    modifier = Modifier.offset(x = 30.dp, y = y.dp),
+                    color = rightColor,
+                    borderColor = rightBorderColor
+                )
+                chairCounter++
             }
 
             // Dynamic Layer: Players
             playerColors.forEachIndexed { index, color ->
-                val pos = getPosition(index, mainProgress.value)
-                Player(
-                    modifier = Modifier.offset(x = pos.x.dp, y = pos.y.dp),
-                    color = color
-                )
+                if (index != eliminatedPlayerIndex) {
+                    val pos = getPosition(index, mainProgress.value)
+                    Player(
+                        modifier = Modifier.offset(x = pos.x.dp, y = pos.y.dp),
+                        color = color
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun Chair(modifier: Modifier = Modifier) {
+fun Chair(modifier: Modifier = Modifier, color: Color, borderColor: Color) {
     Box(
         modifier = modifier
             .size(50.dp) 
-            .background(Color(0xFFFF9800), shape = RoundedCornerShape(4.dp))
-            .border(2.dp, Color(0xFFE65100), shape = RoundedCornerShape(4.dp))
+            .background(color, shape = RoundedCornerShape(4.dp))
+            .border(2.dp, borderColor, shape = RoundedCornerShape(4.dp))
     )
 }
 
