@@ -24,21 +24,26 @@ import kotlinx.coroutines.*
 @Composable
 fun GameScreen() {
     var gameState by remember { mutableStateOf(GameState.IDLE) }
+    var resetToken by remember { mutableIntStateOf(0) }
 
     MaterialTheme {
         Scaffold(
             topBar = { GameHeader(gameState) },
-            bottomBar = { 
+            bottomBar = {
                 GameControls(
                     gameState = gameState,
                     onStartStopClick = {
                         gameState = when (gameState) {
                             GameState.IDLE -> GameState.PLAYING
                             GameState.PLAYING -> GameState.STOPPING
-                            GameState.STOPPING -> GameState.PLAYING 
+                            GameState.STOPPING -> GameState.PLAYING
                         }
+                    },
+                    onResetClick = {
+                        gameState = GameState.IDLE
+                        resetToken++
                     }
-                ) 
+                )
             }
         ) { paddingValues ->
             Box(
@@ -48,8 +53,8 @@ fun GameScreen() {
                     .background(Color(0xFFFAFAFA)),
                 contentAlignment = Alignment.Center
             ) {
-                GameArena(gameState = gameState) { newState ->
-                    gameState = newState 
+                GameArena(gameState = gameState, resetToken = resetToken) { newState ->
+                    gameState = newState
                 }
             }
         }
@@ -83,7 +88,11 @@ fun GameHeader(gameState: GameState) {
 }
 
 @Composable
-fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
+fun GameArena(
+    gameState: GameState,
+    resetToken: Int,
+    onAnimationFinished: (GameState) -> Unit
+) {
     val playerColors = remember {
         listOf(
             Color.Red, Color.Blue, Color.Green, Color.Magenta, Color.Cyan,
@@ -91,45 +100,94 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         )
     }
 
-    var missingChairIndex by remember { mutableStateOf<Int?>(null) } // [NEW] Track missing chair
-    var eliminatedPlayerIndex by remember { mutableStateOf<Int?>(null) } // [NEW] Track eliminated player
+    var missingChairIndices by remember { mutableStateOf(setOf<Int>()) }
+
+    // Keep ACTIVE players in order (this is what fixes round-2+ correctness)
+    var activePlayerIndices by remember { mutableStateOf((0..9).toList()) }
+
+    var currentRoundMissingChairIndex by remember { mutableStateOf<Int?>(null) }
 
     val mainProgress = remember { Animatable(0f) }
 
-    val rowYOffsets = listOf(-140f, -70f, 0f, 70f, 140f) 
+    LaunchedEffect(resetToken) {
+        missingChairIndices = emptySet()
+        activePlayerIndices = (0..9).toList()
+        currentRoundMissingChairIndex = null
+        mainProgress.snapTo(0f)
+    }
+
+    val rowYOffsets = listOf(-140f, -70f, 0f, 70f, 140f)
     val leftX = -100f
     val rightX = 100f
 
     val pathPoints = remember {
         listOf(
-            Offset(leftX, rowYOffsets[0]),  
-            Offset(rightX, rowYOffsets[0]), 
-            Offset(rightX, rowYOffsets[1]), 
-            Offset(rightX, rowYOffsets[2]), 
-            Offset(rightX, rowYOffsets[3]), 
-            Offset(rightX, rowYOffsets[4]), 
-            Offset(leftX, rowYOffsets[4]),  
-            Offset(leftX, rowYOffsets[3]),  
-            Offset(leftX, rowYOffsets[2]),  
-            Offset(leftX, rowYOffsets[1])   
+            Offset(leftX, rowYOffsets[0]),
+            Offset(rightX, rowYOffsets[0]),
+            Offset(rightX, rowYOffsets[1]),
+            Offset(rightX, rowYOffsets[2]),
+            Offset(rightX, rowYOffsets[3]),
+            Offset(rightX, rowYOffsets[4]),
+            Offset(leftX, rowYOffsets[4]),
+            Offset(leftX, rowYOffsets[3]),
+            Offset(leftX, rowYOffsets[2]),
+            Offset(leftX, rowYOffsets[1])
+        )
+    }
+
+    fun lerp(start: Float, stop: Float, fraction: Float): Float {
+        return (1 - fraction) * start + fraction * stop
+    }
+
+    fun quadraticBezier(p0: Offset, p1: Offset, p2: Offset, t: Float): Offset {
+        val x = (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * p1.x + t * t * p2.x
+        val y = (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * p1.y + t * t * p2.y
+        return Offset(x, y)
+    }
+
+    // IMPORTANT: index here is the *order among active players*, not the original player id
+    fun getPosition(orderIndex: Int, progress: Float): Offset {
+        val effectivePos = (progress + orderIndex) % 10f
+        val currentSlot = effectivePos.toInt()
+        val nextSlot = (currentSlot + 1) % 10
+        val fraction = effectivePos - currentSlot
+
+        val p1 = pathPoints[currentSlot]
+        val p2 = pathPoints[nextSlot]
+
+        if (currentSlot == 0) {
+            val controlPoint = Offset(0f, -300f)
+            return quadraticBezier(p1, controlPoint, p2, fraction)
+        } else if (currentSlot == 5) {
+            val controlPoint = Offset(0f, 300f)
+            return quadraticBezier(p1, controlPoint, p2, fraction)
+        }
+
+        return Offset(
+            x = lerp(p1.x, p2.x, fraction),
+            y = lerp(p1.y, p2.y, fraction)
         )
     }
 
     LaunchedEffect(gameState) {
         if (gameState == GameState.PLAYING) {
-            // [NEW] Reset and start timer for disappearing chair
-            missingChairIndex = null
-            eliminatedPlayerIndex = null
-            launch {
-                delay(5000)
-                if (isActive) {
-                    missingChairIndex = (0..9).random()
+            if (currentRoundMissingChairIndex == null) {
+                launch {
+                    delay(5000)
+                    if (!isActive || currentRoundMissingChairIndex != null) return@launch
+
+                    val availableChairs = (0..9).filter { it !in missingChairIndices }
+                    if (availableChairs.isNotEmpty()) {
+                        val picked = availableChairs.random()
+                        currentRoundMissingChairIndex = picked
+                        missingChairIndices = missingChairIndices + picked
+                    }
                 }
             }
 
             while (isActive) {
                 mainProgress.animateTo(
-                    targetValue = mainProgress.value + 10f, 
+                    targetValue = mainProgress.value + 10f,
                     animationSpec = tween(durationMillis = 3000, easing = LinearEasing)
                 )
                 mainProgress.snapTo(mainProgress.value % 10f)
@@ -137,74 +195,42 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
         } else if (gameState == GameState.STOPPING) {
             val current = mainProgress.value
             val target = kotlin.math.ceil(current)
-            
-            // Calculate which player will land on the missing chair
-            if (missingChairIndex != null) {
-                // Map from path point index to chair index
-                // Path: top-left(0) → top-right(1) → right-side-down(2-5) → bottom-left(6) → left-side-up(7-9)
-                // Chairs: left-right pairs from top to bottom (0-9)
-                val pathToChairMap = listOf(0, 1, 3, 5, 7, 9, 8, 6, 4, 2)
-                
-                // When animation stops at 'target', player at index 'i' will be at path point (target + i) % 10
-                // We need to find which player's path point maps to the missing chair
-                val targetMod = (target % 10).toInt()
-                
-                // Find which player index lands on the missing chair
-                for (playerIndex in 0..9) {
-                    val pathPoint = (targetMod + playerIndex) % 10
-                    val chairIndex = pathToChairMap[pathPoint]
-                    if (chairIndex == missingChairIndex) {
-                        eliminatedPlayerIndex = playerIndex
-                        break
-                    }
-                }
-            }
 
+            // Animate to the stopping point first (so "who lands where" is consistent)
             mainProgress.animateTo(
                 targetValue = target,
                 animationSpec = spring(stiffness = Spring.StiffnessLow)
             )
             mainProgress.snapTo(target % 10f)
+
+            val roundMissing = currentRoundMissingChairIndex
+            if (roundMissing != null && activePlayerIndices.isNotEmpty()) {
+                // Path point -> chair index mapping (same as before)
+                val pathToChairMap = listOf(0, 1, 3, 5, 7, 9, 8, 6, 4, 2)
+
+                val targetMod = (target % 10).toInt()
+
+                // Find which ACTIVE player (by order) lands on the missing chair
+                var eliminatedOrderIndex: Int? = null
+                for (orderIndex in activePlayerIndices.indices) {
+                    val pathPoint = (targetMod + orderIndex) % 10
+                    val chairIndex = pathToChairMap[pathPoint]
+                    if (chairIndex == roundMissing) {
+                        eliminatedOrderIndex = orderIndex
+                        break
+                    }
+                }
+
+                if (eliminatedOrderIndex != null) {
+                    // Remove that player from the active list (this is the real "elimination")
+                    activePlayerIndices = activePlayerIndices.toMutableList().also { it.removeAt(eliminatedOrderIndex) }
+                }
+
+                currentRoundMissingChairIndex = null
+            }
+
             onAnimationFinished(GameState.IDLE)
         }
-    }
-
-    fun lerp(start: Float, stop: Float, fraction: Float): Float {
-        return (1 - fraction) * start + fraction * stop
-    }
-
-    // Cubic Bezier helper for cleaner arcs, or simple Quadratic
-    fun quadraticBezier(p0: Offset, p1: Offset, p2: Offset, t: Float): Offset {
-        val x = (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * p1.x + t * t * p2.x
-        val y = (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * p1.y + t * t * p2.y
-        return Offset(x, y)
-    }
-
-    fun getPosition(index: Int, progress: Float): Offset {
-        val effectivePos = (progress + index) % 10f
-        val currentSlot = effectivePos.toInt()
-        val nextSlot = (currentSlot + 1) % 10
-        val fraction = effectivePos - currentSlot
-        
-        val p1 = pathPoints[currentSlot]
-        val p2 = pathPoints[nextSlot]
-
-        // Top Crossing (0 -> 1)
-        if (currentSlot == 0) {
-            val controlPoint = Offset(0f, -300f) // Arc much higher
-            return quadraticBezier(p1, controlPoint, p2, fraction)
-        }
-        // Bottom Crossing (5 -> 6)
-        else if (currentSlot == 5) {
-            val controlPoint = Offset(0f, 300f) // Arc much lower
-            return quadraticBezier(p1, controlPoint, p2, fraction)
-        }
-        
-        // Linear interpolation for side movements
-        return Offset(
-            x = lerp(p1.x, p2.x, fraction),
-            y = lerp(p1.y, p2.y, fraction)
-        )
     }
 
     Box(
@@ -216,33 +242,16 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
             modifier = Modifier
                 .size(600.dp)
                 .clip(RectangleShape)
-                .background(arenaBackgroundColor) 
+                .background(arenaBackgroundColor)
                 .padding(16.dp),
             contentAlignment = Alignment.Center
         ) {
-            // Render Chairs Absolutely to match the Rows
-            // Map 0..9 indices to the chairs in order (Top-Left down, then Bottom-Right up? Or simple row order?)
-            // Based on pathPoints, logic for 'chairs' isn't explicitly indexed 0..9 in the original code, 
-            // but let's assign them indices 0..9 for the purpose of "random chair".
-            // Left col: 0, 1, 2, 3, 4 (top to bottom) -> Y offsets -140..140
-            // Right col: 5, 6, 7, 8, 9 (top to bottom) -> Y offsets -140..140
-            // Wait, original code:
-            // rowYOffsets.forEach { y ->
-            //    Chair(left)
-            //    Chair(right)
-            // }
-            // That renders 10 chairs. Let's assign indices:
-            // i=0: left, y[0]; i=1: right, y[0]
-            // i=2: left, y[1]; i=3: right, y[1]
-            // ...
-            
             var chairCounter = 0
             rowYOffsets.forEach { y ->
-                // Left Chair
-                val isLeftMissing = missingChairIndex == chairCounter
+                val isLeftMissing = chairCounter in missingChairIndices
                 val leftColor = if (isLeftMissing) arenaBackgroundColor else Color(0xFFFF9800)
-                val leftBorderColor = if (isLeftMissing) arenaBackgroundColor else Color(0xFFE65100) // Hide border too
-                
+                val leftBorderColor = if (isLeftMissing) arenaBackgroundColor else Color(0xFFE65100)
+
                 Chair(
                     modifier = Modifier.offset(x = (-30).dp, y = y.dp),
                     color = leftColor,
@@ -250,10 +259,9 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
                 )
                 chairCounter++
 
-                // Right Chair
-                val isRightMissing = missingChairIndex == chairCounter
+                val isRightMissing = chairCounter in missingChairIndices
                 val rightColor = if (isRightMissing) arenaBackgroundColor else Color(0xFFFF9800)
-                val rightBorderColor = if (isRightMissing) arenaBackgroundColor else Color(0xFFE65100) 
+                val rightBorderColor = if (isRightMissing) arenaBackgroundColor else Color(0xFFE65100)
 
                 Chair(
                     modifier = Modifier.offset(x = 30.dp, y = y.dp),
@@ -263,15 +271,19 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
                 chairCounter++
             }
 
+            playerColors.forEachIndexed { originalIndex, color ->
+                // (No change needed here; we will render based on active list below)
+            }
+
+            // Replace your player rendering loop with this:
+            // (Keep it in the same place you currently render players)
             // Dynamic Layer: Players
-            playerColors.forEachIndexed { index, color ->
-                if (index != eliminatedPlayerIndex) {
-                    val pos = getPosition(index, mainProgress.value)
-                    Player(
-                        modifier = Modifier.offset(x = pos.x.dp, y = pos.y.dp),
-                        color = color
-                    )
-                }
+            activePlayerIndices.forEachIndexed { orderIndex, playerIndex ->
+                val pos = getPosition(orderIndex, mainProgress.value)
+                Player(
+                    modifier = Modifier.offset(x = pos.x.dp, y = pos.y.dp),
+                    color = playerColors[playerIndex]
+                )
             }
         }
     }
@@ -281,7 +293,7 @@ fun GameArena(gameState: GameState, onAnimationFinished: (GameState) -> Unit) {
 fun Chair(modifier: Modifier = Modifier, color: Color, borderColor: Color) {
     Box(
         modifier = modifier
-            .size(50.dp) 
+            .size(50.dp)
             .background(color, shape = RoundedCornerShape(4.dp))
             .border(2.dp, borderColor, shape = RoundedCornerShape(4.dp))
     )
@@ -291,7 +303,7 @@ fun Chair(modifier: Modifier = Modifier, color: Color, borderColor: Color) {
 fun Player(modifier: Modifier = Modifier, color: Color) {
     Box(
         modifier = modifier
-            .size(40.dp) 
+            .size(40.dp)
             .clip(CircleShape)
             .background(color)
             .border(2.dp, Color.White, CircleShape)
@@ -299,7 +311,11 @@ fun Player(modifier: Modifier = Modifier, color: Color) {
 }
 
 @Composable
-fun GameControls(gameState: GameState, onStartStopClick: () -> Unit) {
+fun GameControls(
+    gameState: GameState,
+    onStartStopClick: () -> Unit,
+    onResetClick: () -> Unit
+) {
     BottomAppBar(
         backgroundColor = Color.White,
         elevation = 8.dp
@@ -317,16 +333,17 @@ fun GameControls(gameState: GameState, onStartStopClick: () -> Unit) {
                 onClick = onStartStopClick,
                 shape = RoundedCornerShape(50),
                 modifier = Modifier.height(48.dp),
-                enabled = gameState != GameState.STOPPING 
+                enabled = gameState != GameState.STOPPING
             ) {
-                val icon = if (gameState == GameState.PLAYING) Icons.Default.Close else Icons.Default.PlayArrow
+                val icon = if (gameState == GameState.PLAYING)
+                    Icons.Default.Close else Icons.Default.PlayArrow
                 val text = if (gameState == GameState.PLAYING) "Stop Music" else "Start Music"
                 Icon(icon, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(text)
             }
 
-            IconButton(onClick = { /* TODO: Reset */ }) {
+            IconButton(onClick = onResetClick) {
                 Icon(Icons.Default.Refresh, contentDescription = "Reset")
             }
         }
