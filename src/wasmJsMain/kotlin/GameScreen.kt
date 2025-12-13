@@ -209,11 +209,15 @@ fun GameArena(
                     delay(5000)
                     if (!isActive || currentRoundMissingChairIndex != null) return@launch
 
-                    val availableChairs = (0..9).filter { it !in missingChairIndices }
-                    if (availableChairs.isNotEmpty()) {
-                        val picked = availableChairs.random()
-                        currentRoundMissingChairIndex = picked
-                        missingChairIndices = missingChairIndices + picked
+                    // Define the elimination order: bottom to top, left then right in each row
+                    val eliminationOrder = listOf(8, 9, 6, 7, 4, 5, 2, 3, 0, 1)
+                    
+                    // Find the next chair to eliminate
+                    val nextChair = eliminationOrder.firstOrNull { it !in missingChairIndices }
+                    
+                    if (nextChair != null) {
+                        currentRoundMissingChairIndex = nextChair
+                        missingChairIndices = missingChairIndices + nextChair
                     }
                 }
             }
