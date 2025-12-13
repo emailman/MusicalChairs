@@ -25,6 +25,7 @@ import kotlinx.coroutines.*
 fun GameScreen() {
     var gameState by remember { mutableStateOf(GameState.IDLE) }
     var resetToken by remember { mutableIntStateOf(0) }
+    var debugMessages by remember { mutableStateOf(emptyList<String>()) }
 
     MaterialTheme {
         Scaffold(
@@ -53,8 +54,39 @@ fun GameScreen() {
                     .background(Color(0xFFFAFAFA)),
                 contentAlignment = Alignment.Center
             ) {
-                GameArena(gameState = gameState, resetToken = resetToken) { newState ->
-                    gameState = newState
+                GameArena(
+                    gameState = gameState, 
+                    resetToken = resetToken,
+                    onDebugMessage = { msg -> debugMessages = debugMessages + msg },
+                    onAnimationFinished = { newState ->
+                        gameState = newState
+                    }
+                )
+                
+                // Debug panel on left side
+                if (debugMessages.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .width(350.dp)
+                            .fillMaxHeight()
+                            .background(Color.Black.copy(alpha = 0.95f))
+                            .padding(8.dp)
+                            .align(Alignment.CenterStart)
+                    ) {
+                        Text("Debug Log:", color = Color.White, fontSize = 14.sp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF1E1E1E))
+                                .padding(4.dp)
+                        ) {
+                            Column {
+                                debugMessages.forEach { msg ->
+                                    Text(msg, color = Color.Green, fontSize = 9.sp)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -91,6 +123,7 @@ fun GameHeader(gameState: GameState) {
 fun GameArena(
     gameState: GameState,
     resetToken: Int,
+    onDebugMessage: (String) -> Unit = {},
     onAnimationFinished: (GameState) -> Unit
 ) {
     val playerColors = remember {
@@ -210,20 +243,42 @@ fun GameArena(
 
                 val targetMod = (target % 10).toInt()
 
-                // Find which ACTIVE player (by order) lands on the missing chair
+                onDebugMessage("=== ELIMINATION LOGIC ===")
+                onDebugMessage("Missing chair index: $roundMissing")
+                onDebugMessage("Target position (targetMod): $targetMod")
+                onDebugMessage("Active players: ${activePlayerIndices.toTypedArray().contentToString()}")
+
+                // Build a set of all available (non-missing) chairs
+                val availableChairs = (0..9).filter { it !in missingChairIndices }.toSet()
+                onDebugMessage("Available chairs: ${availableChairs.toTypedArray().contentToString()}")
+                onDebugMessage("Player colors: 0=Red,1=Blue,2=Green,3=Mag,4=Cyan,5=Yellow,6=Black,7=Gray,8=Purple,9=Teal")
+                
+                // Find which ACTIVE player (by order) is next to the missing chair
+                // This means the player who would land on a path point that maps to a missing chair
                 var eliminatedOrderIndex: Int? = null
                 for (orderIndex in activePlayerIndices.indices) {
                     val pathPoint = (targetMod + orderIndex) % 10
                     val chairIndex = pathToChairMap[pathPoint]
-                    if (chairIndex == roundMissing) {
+                    val playerIndex = activePlayerIndices[orderIndex]
+                    val chairAvailable = chairIndex in availableChairs
+                    
+                    onDebugMessage("Player $playerIndex (order $orderIndex) -> pathPoint=$pathPoint -> chair=$chairIndex (available=$chairAvailable)")
+                    
+                    // A player is eliminated if their chair is missing (they have nowhere to sit)
+                    if (!chairAvailable) {
+                        onDebugMessage("  ^^^ ELIMINATED! Chair $chairIndex not available")
                         eliminatedOrderIndex = orderIndex
                         break
                     }
                 }
 
                 if (eliminatedOrderIndex != null) {
+                    val eliminatedPlayerId = activePlayerIndices[eliminatedOrderIndex]
+                    onDebugMessage("Eliminating player ID: $eliminatedPlayerId")
                     // Remove that player from the active list (this is the real "elimination")
                     activePlayerIndices = activePlayerIndices.toMutableList().also { it.removeAt(eliminatedOrderIndex) }
+                } else {
+                    onDebugMessage("No player eliminated (ERROR!)")
                 }
 
                 currentRoundMissingChairIndex = null
@@ -272,7 +327,7 @@ fun GameArena(
             }
 
             playerColors.forEachIndexed { originalIndex, color ->
-                // (No change needed here; we will render based on active list below)
+                // (No change needed here; we will render based on the active list below)
             }
 
             // Replace your player rendering loop with this:
