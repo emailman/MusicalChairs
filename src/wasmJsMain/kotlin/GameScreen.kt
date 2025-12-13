@@ -26,6 +26,7 @@ fun GameScreen() {
     var gameState by remember { mutableStateOf(GameState.IDLE) }
     var resetToken by remember { mutableIntStateOf(0) }
     var debugMessages by remember { mutableStateOf(emptyList<String>()) }
+    var isButtonEnabled by remember { mutableStateOf(true) }
 
     MaterialTheme {
         Scaffold(
@@ -33,15 +34,20 @@ fun GameScreen() {
             bottomBar = {
                 GameControls(
                     gameState = gameState,
+                    isButtonEnabled = isButtonEnabled,
                     onStartStopClick = {
                         gameState = when (gameState) {
-                            GameState.IDLE -> GameState.PLAYING
+                            GameState.IDLE -> {
+                                isButtonEnabled = false
+                                GameState.PLAYING
+                            }
                             GameState.PLAYING -> GameState.STOPPING
                             GameState.STOPPING -> GameState.PLAYING
                         }
                     },
                     onResetClick = {
                         gameState = GameState.IDLE
+                        isButtonEnabled = true
                         resetToken++
                     }
                 )
@@ -60,6 +66,9 @@ fun GameScreen() {
                     onDebugMessage = { msg -> debugMessages = debugMessages + msg },
                     onAnimationFinished = { newState ->
                         gameState = newState
+                    },
+                    onChairRemoved = {
+                        isButtonEnabled = true
                     }
                 )
                 
@@ -124,7 +133,8 @@ fun GameArena(
     gameState: GameState,
     resetToken: Int,
     onDebugMessage: (String) -> Unit = {},
-    onAnimationFinished: (GameState) -> Unit
+    onAnimationFinished: (GameState) -> Unit,
+    onChairRemoved: () -> Unit = {}
 ) {
     val playerColors = remember {
         listOf(
@@ -153,19 +163,36 @@ fun GameArena(
     val leftX = -100f
     val rightX = 100f
 
-    val pathPoints = remember {
-        listOf(
-            Offset(leftX, rowYOffsets[0]),
-            Offset(rightX, rowYOffsets[0]),
-            Offset(rightX, rowYOffsets[1]),
-            Offset(rightX, rowYOffsets[2]),
-            Offset(rightX, rowYOffsets[3]),
-            Offset(rightX, rowYOffsets[4]),
-            Offset(leftX, rowYOffsets[4]),
-            Offset(leftX, rowYOffsets[3]),
-            Offset(leftX, rowYOffsets[2]),
-            Offset(leftX, rowYOffsets[1])
-        )
+    // Calculate the lowest row that still has at least one chair
+    val lowestActiveRowIndex = remember(missingChairIndices) {
+        when {
+            8 !in missingChairIndices || 9 !in missingChairIndices -> 4 // Bottom row
+            6 !in missingChairIndices || 7 !in missingChairIndices -> 3 // 4th row
+            4 !in missingChairIndices || 5 !in missingChairIndices -> 2 // Middle row
+            2 !in missingChairIndices || 3 !in missingChairIndices -> 1 // 2nd row
+            else -> 0 // Top row only
+        }
+    }
+
+    // Dynamically calculate path points - keeping original structure but shortening from bottom
+    val pathPoints = remember(lowestActiveRowIndex) {
+        buildList {
+            add(Offset(leftX, rowYOffsets[0]))   // 0: Top-left
+            add(Offset(rightX, rowYOffsets[0]))  // 1: Top-right
+            
+            // Right side: add points for each active row below top
+            for (rowIndex in 1..lowestActiveRowIndex) {
+                add(Offset(rightX, rowYOffsets[rowIndex]))
+            }
+            
+            // Left side bottom: add the corner point at lowest active row
+            add(Offset(leftX, rowYOffsets[lowestActiveRowIndex]))
+            
+            // Left side: add points going back up (excluding top and bottom)
+            for (rowIndex in (lowestActiveRowIndex - 1) downTo 1) {
+                add(Offset(leftX, rowYOffsets[rowIndex]))
+            }
+        }
     }
 
     fun lerp(start: Float, stop: Float, fraction: Float): Float {
@@ -180,19 +207,28 @@ fun GameArena(
 
     // IMPORTANT: index here is the *order among active players*, not the original player id
     fun getPosition(orderIndex: Int, progress: Float): Offset {
-        val effectivePos = (progress + orderIndex) % 10f
+        val pathSize = pathPoints.size
+        if (pathSize < 2) return Offset.Zero
+        
+        val effectivePos = (progress + orderIndex) % pathSize.toFloat()
         val currentSlot = effectivePos.toInt()
-        val nextSlot = (currentSlot + 1) % 10
+        val nextSlot = (currentSlot + 1) % pathSize
         val fraction = effectivePos - currentSlot
 
         val p1 = pathPoints[currentSlot]
         val p2 = pathPoints[nextSlot]
 
+        // Curve at top (slot 0 -> slot 1: top-left to top-right)
         if (currentSlot == 0) {
             val controlPoint = Offset(0f, -300f)
             return quadraticBezier(p1, controlPoint, p2, fraction)
-        } else if (currentSlot == 5) {
-            val controlPoint = Offset(0f, 300f)
+        }
+        
+        // Curve at bottom - this is the transition at the lowest active row
+        // From right side to left side
+        val bottomTransitionIndex = 1 + lowestActiveRowIndex
+        if (currentSlot == bottomTransitionIndex) {
+            val controlPoint = Offset(0f, rowYOffsets[lowestActiveRowIndex] + 200f)
             return quadraticBezier(p1, controlPoint, p2, fraction)
         }
 
@@ -218,27 +254,30 @@ fun GameArena(
                     if (nextChair != null) {
                         currentRoundMissingChairIndex = nextChair
                         missingChairIndices = missingChairIndices + nextChair
+                        onChairRemoved()
                     }
                 }
             }
 
             while (isActive) {
+                val pathSize = pathPoints.size.toFloat()
                 mainProgress.animateTo(
-                    targetValue = mainProgress.value + 10f,
+                    targetValue = mainProgress.value + pathSize,
                     animationSpec = tween(durationMillis = 3000, easing = LinearEasing)
                 )
-                mainProgress.snapTo(mainProgress.value % 10f)
+                mainProgress.snapTo(mainProgress.value % pathSize)
             }
         } else if (gameState == GameState.STOPPING) {
             val current = mainProgress.value
-            val target = kotlin.math.ceil(current)
+            val pathSize = pathPoints.size.toFloat()
+            val target = kotlin.math.ceil(current / pathSize) * pathSize
 
             // Animate to the stopping point first (so "who lands where" is consistent)
             mainProgress.animateTo(
                 targetValue = target,
                 animationSpec = spring(stiffness = Spring.StiffnessLow)
             )
-            mainProgress.snapTo(target % 10f)
+            mainProgress.snapTo(target % pathSize)
 
             val roundMissing = currentRoundMissingChairIndex
             if (roundMissing != null && activePlayerIndices.isNotEmpty()) {
@@ -330,12 +369,6 @@ fun GameArena(
                 chairCounter++
             }
 
-            playerColors.forEachIndexed { originalIndex, color ->
-                // (No change needed here; we will render based on the active list below)
-            }
-
-            // Replace your player rendering loop with this:
-            // (Keep it in the same place you currently render players)
             // Dynamic Layer: Players
             activePlayerIndices.forEachIndexed { orderIndex, playerIndex ->
                 val pos = getPosition(orderIndex, mainProgress.value)
@@ -372,6 +405,7 @@ fun Player(modifier: Modifier = Modifier, color: Color) {
 @Composable
 fun GameControls(
     gameState: GameState,
+    isButtonEnabled: Boolean,
     onStartStopClick: () -> Unit,
     onResetClick: () -> Unit
 ) {
@@ -392,7 +426,7 @@ fun GameControls(
                 onClick = onStartStopClick,
                 shape = RoundedCornerShape(50),
                 modifier = Modifier.height(48.dp),
-                enabled = gameState != GameState.STOPPING
+                enabled = gameState != GameState.STOPPING && isButtonEnabled
             ) {
                 val icon = if (gameState == GameState.PLAYING)
                     Icons.Default.Close else Icons.Default.PlayArrow
