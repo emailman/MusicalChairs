@@ -61,7 +61,7 @@ fun GameScreen() {
                 contentAlignment = Alignment.Center
             ) {
                 GameArena(
-                    gameState = gameState, 
+                    gameState = gameState,
                     resetToken = resetToken,
                     onDebugMessage = { msg -> debugMessages = debugMessages + msg },
                     onAnimationFinished = { newState ->
@@ -71,7 +71,7 @@ fun GameScreen() {
                         isButtonEnabled = true
                     }
                 )
-                
+
                 // Debug panel on left side
                 if (debugMessages.isNotEmpty()) {
                     Column(
@@ -179,15 +179,15 @@ fun GameArena(
         buildList {
             add(Offset(leftX, rowYOffsets[0]))   // 0: Top-left
             add(Offset(rightX, rowYOffsets[0]))  // 1: Top-right
-            
+
             // Right side: add points for each active row below top
             for (rowIndex in 1..lowestActiveRowIndex) {
                 add(Offset(rightX, rowYOffsets[rowIndex]))
             }
-            
+
             // Left side bottom: add the corner point at lowest active row
             add(Offset(leftX, rowYOffsets[lowestActiveRowIndex]))
-            
+
             // Left side: add points going back up (excluding top and bottom)
             for (rowIndex in (lowestActiveRowIndex - 1) downTo 1) {
                 add(Offset(leftX, rowYOffsets[rowIndex]))
@@ -206,11 +206,17 @@ fun GameArena(
     }
 
     // IMPORTANT: index here is the *order among active players*, not the original player id
+    // Progress is ALWAYS in 10-point space (0-10 for full loop)
     fun getPosition(orderIndex: Int, progress: Float): Offset {
         val pathSize = pathPoints.size
         if (pathSize < 2) return Offset.Zero
-        
-        val effectivePos = (progress + orderIndex) % pathSize.toFloat()
+
+        // Map from 10-point space to actual path space
+        // progress is in range [0, 10), we need to map to [0, pathSize)
+        val progressInPathSpace = (progress / 10f) * pathSize.toFloat()
+        val orderOffsetInPathSpace = (orderIndex.toFloat() / 10f) * pathSize.toFloat()
+
+        val effectivePos = (progressInPathSpace + orderOffsetInPathSpace) % pathSize.toFloat()
         val currentSlot = effectivePos.toInt()
         val nextSlot = (currentSlot + 1) % pathSize
         val fraction = effectivePos - currentSlot
@@ -223,7 +229,7 @@ fun GameArena(
             val controlPoint = Offset(0f, -300f)
             return quadraticBezier(p1, controlPoint, p2, fraction)
         }
-        
+
         // Curve at bottom - this is the transition at the lowest active row
         // From right side to left side
         val bottomTransitionIndex = 1 + lowestActiveRowIndex
@@ -247,10 +253,10 @@ fun GameArena(
 
                     // Define the elimination order: bottom to top, left then right in each row
                     val eliminationOrder = listOf(8, 9, 6, 7, 4, 5, 2, 3, 0, 1)
-                    
+
                     // Find the next chair to eliminate
                     val nextChair = eliminationOrder.firstOrNull { it !in missingChairIndices }
-                    
+
                     if (nextChair != null) {
                         currentRoundMissingChairIndex = nextChair
                         missingChairIndices = missingChairIndices + nextChair
@@ -260,65 +266,71 @@ fun GameArena(
             }
 
             while (isActive) {
-                val pathSize = pathPoints.size.toFloat()
+                // Always animate in 10-point space, regardless of actual path size
                 mainProgress.animateTo(
-                    targetValue = mainProgress.value + pathSize,
+                    targetValue = mainProgress.value + 10f,
                     animationSpec = tween(durationMillis = 3000, easing = LinearEasing)
                 )
-                mainProgress.snapTo(mainProgress.value % pathSize)
+                mainProgress.snapTo(mainProgress.value % 10f)
             }
         } else if (gameState == GameState.STOPPING) {
             val current = mainProgress.value
-            val pathSize = pathPoints.size.toFloat()
-            val target = kotlin.math.ceil(current / pathSize) * pathSize
+            // target is always in 10-point space
+            val target = kotlin.math.ceil(current)
 
             // Animate to the stopping point first (so "who lands where" is consistent)
             mainProgress.animateTo(
                 targetValue = target,
                 animationSpec = spring(stiffness = Spring.StiffnessLow)
             )
-            mainProgress.snapTo(target % pathSize)
+            mainProgress.snapTo(target % 10f)
 
             val roundMissing = currentRoundMissingChairIndex
             if (roundMissing != null && activePlayerIndices.isNotEmpty()) {
-                // Path point -> chair index mapping (same as before)
-                val pathToChairMap = listOf(0, 1, 3, 5, 7, 9, 8, 6, 4, 2)
-
-                val targetMod = (target % 10).toInt()
-
-                onDebugMessage("=== ELIMINATION LOGIC ===")
-                onDebugMessage("Missing chair index: $roundMissing")
-                onDebugMessage("Target position (targetMod): $targetMod")
+                onDebugMessage("=== SIMPLIFIED ELIMINATION LOGIC ===")
+                onDebugMessage("Chair that was just eliminated: $roundMissing")
                 onDebugMessage("Active players: ${activePlayerIndices.toTypedArray().contentToString()}")
-
-                // Build a set of all available (non-missing) chairs
-                val availableChairs = (0..9).filter { it !in missingChairIndices }.toSet()
-                onDebugMessage("Available chairs: ${availableChairs.toTypedArray().contentToString()}")
                 onDebugMessage("Player colors: 0=Red,1=Blue,2=Green,3=Mag,4=Cyan,5=Yellow,6=Black,7=Gray,8=Purple,9=Teal")
-                
-                // Find which ACTIVE player (by order) is next to the missing chair
-                // This means the player who would land on a path point that maps to a missing chair
+
+                // Map of original path points (0-9) to chair indices
+                // This is based on the ORIGINAL full path before any chairs were removed
+                val originalPathToChairMap = listOf(0, 1, 3, 5, 7, 9, 8, 6, 4, 2)
+
+                // Since players always stop at integer path positions, find which path point
+                // on the ORIGINAL 10-point path corresponds to the eliminated chair
+                val pathPointWithEliminatedChair = originalPathToChairMap.indexOf(roundMissing)
+
+                onDebugMessage("Original path point for chair $roundMissing: $pathPointWithEliminatedChair")
+
+                if (pathPointWithEliminatedChair < 0) {
+                    onDebugMessage("ERROR: Invalid chair index")
+                    currentRoundMissingChairIndex = null
+                    onAnimationFinished(GameState.IDLE)
+                    return@LaunchedEffect
+                }
+
+                // Now determine where each player is on the ORIGINAL 10-point path
+                val targetMod = target.toInt() % 10
+                onDebugMessage("Target position on original path: $targetMod")
+
                 var eliminatedOrderIndex: Int? = null
-                for (orderIndex in activePlayerIndices.indices) {
-                    val pathPoint = (targetMod + orderIndex) % 10
-                    val chairIndex = pathToChairMap[pathPoint]
-                    val playerIndex = activePlayerIndices[orderIndex]
-                    val chairAvailable = chairIndex in availableChairs
-                    
-                    onDebugMessage("Player $playerIndex (order $orderIndex) -> pathPoint=$pathPoint -> chair=$chairIndex (available=$chairAvailable)")
-                    
-                    // A player is eliminated if their chair is missing (they have nowhere to sit)
-                    if (!chairAvailable) {
-                        onDebugMessage("  ^^^ ELIMINATED! Chair $chairIndex not available")
+
+                activePlayerIndices.forEachIndexed { orderIndex, playerIndex ->
+                    // Calculate which original path point this player occupies
+                    val originalPathPoint = (targetMod + orderIndex) % 10
+                    val assignedChair = originalPathToChairMap[originalPathPoint]
+
+                    onDebugMessage("Player $playerIndex (order $orderIndex) -> original path point $originalPathPoint -> chair $assignedChair")
+
+                    if (assignedChair == roundMissing) {
+                        onDebugMessage("  ^^^ ELIMINATED! This player's chair ($roundMissing) was removed")
                         eliminatedOrderIndex = orderIndex
-                        break
                     }
                 }
 
                 if (eliminatedOrderIndex != null) {
                     val eliminatedPlayerId = activePlayerIndices[eliminatedOrderIndex]
                     onDebugMessage("Eliminating player ID: $eliminatedPlayerId")
-                    // Remove that player from the active list (this is the real "elimination")
                     activePlayerIndices = activePlayerIndices.toMutableList().also { it.removeAt(eliminatedOrderIndex) }
                 } else {
                     onDebugMessage("No player eliminated (ERROR!)")
